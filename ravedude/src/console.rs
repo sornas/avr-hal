@@ -1,6 +1,8 @@
 use anyhow::Context as _;
-use std::io::Read as _;
+use std::io::{BufReader, Read as _};
 use std::io::Write as _;
+use raw_tty::IntoRawMode;
+use utf8_chars::BufReadCharsExt;
 
 pub fn open(port: &std::path::Path, baudrate: u32) -> anyhow::Result<()> {
     let mut rx = serialport::new(port.to_string_lossy(), baudrate)
@@ -9,15 +11,8 @@ pub fn open(port: &std::path::Path, baudrate: u32) -> anyhow::Result<()> {
         .with_context(|| format!("failed to open serial port `{}`", port.display()))?;
     let mut tx = rx.try_clone_native()?;
 
-    let mut stdin = std::io::stdin();
+    let mut stdin = BufReader::new(std::io::stdin().into_raw_mode()?);
     let mut stdout = std::io::stdout();
-
-    // Set a CTRL+C handler to terminate cleanly instead of with an error.
-    ctrlc::set_handler(move || {
-        eprintln!("");
-        eprintln!("Exiting.");
-        std::process::exit(0);
-    }).context("failed setting a CTRL+C handler")?;
 
     // Spawn a thread for the receiving end because stdio is not portably non-blocking...
     std::thread::spawn(move || loop {
@@ -34,9 +29,16 @@ pub fn open(port: &std::path::Path, baudrate: u32) -> anyhow::Result<()> {
     });
 
     loop {
-        let mut buf = [0u8; 4098];
-        let count = stdin.read(&mut buf)?;
-        tx.write(&buf[..count])?;
+        let mut buf = [0u8; 4];
+        let c = stdin.read_char()?.unwrap();
+        // EndOfText, On ctrl+c
+        if c == char::from(3u8) {
+            eprintln!("");
+            eprintln!("Exiting.");
+            std::process::exit(0);
+        }
+        let len = c.encode_utf8(&mut buf).len();
+        tx.write(&buf[..len])?;
         tx.flush()?;
     }
 }
